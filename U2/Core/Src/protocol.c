@@ -10,6 +10,7 @@
 #include "bsp_motor.h"
 #include "bsp_adc.h"
 #include "bsp_tmc2209.h"
+#include "link_u3.h"
 #include "usbd_cdc_if.h"
 #include <string.h>
 
@@ -152,6 +153,151 @@ static void proto_dispatch(uint16_t cmd, uint16_t seq, const uint8_t *data, uint
         put_u16(&s_payload[n], snap.vref_mv);       n += 2u;
         put_u16(&s_payload[n], snap.window_size);   n += 2u;
         put_u32(&s_payload[n], snap.total_samples); n += 4u;
+        proto_send(cmd, seq, s_payload, n);
+        break;
+    }
+
+    /*--- MRE 整圈极值 (低于下限 / 高于上限即不合格) ---*/
+    case PROTO_CMD_MRE_PEAK: {
+        uint16_t pmn = 0u;
+        uint16_t pmx = 0u;
+        uint32_t pcnt = 0u;
+        uint8_t  status = PROTO_ST_OK;
+        uint8_t  measured = 0u;     /* 1 = 已经取到极值, 需要判定 */
+
+        if ((len != 1u) && (len != 7u)) {
+            status = PROTO_ST_ERR_PARAM;
+        } else {
+            uint8_t mode = data[0];
+
+            if (mode > PROTO_MRE_PEAK_MODE_SELFTEST) {
+                status = PROTO_ST_ERR_PARAM;
+
+            } else if (mode == PROTO_MRE_PEAK_MODE_SELFTEST) {
+                /* 清零 -> 转一圈 -> 读结果, 一条命令搞定 */
+                uint32_t steps = (len == 7u) ? get_u32(&data[1]) : PROTO_MRE_PEAK_STEPS;
+                uint32_t freq  = (len == 7u) ? get_u16(&data[5]) : PROTO_MRE_PEAK_FREQ;
+
+                if ((steps == 0u) || (steps > PROTO_MRE_PEAK_STEPS_MAX)) {
+                    status = PROTO_ST_ERR_PARAM;
+                } else if (BSP_Motor_IsBusy()) {
+                    status = PROTO_ST_BUSY;
+                } else {
+                    uint32_t t_ms;
+                    uint32_t t0;
+                    uint8_t  timedout = 0u;
+
+                    BSP_ADC_GetPeak(NULL, NULL, NULL, 1u);      /* 清零 */
+
+                    if (!BSP_Motor_Move(PROTO_DIR_CW, steps, freq)) {
+                        status = PROTO_ST_ERR_PARAM;
+                    } else {
+                        /* 超时 = 理论耗时 x2 + 1s, 覆盖加减速段 */
+                        t_ms = (uint32_t)(((uint64_t)steps * 1000u) / (uint64_t)freq) * 2u + 1000u;
+                        t0 = HAL_GetTick();
+
+                        while (BSP_Motor_IsBusy()) {
+                            if ((HAL_GetTick() - t0) > t_ms) {
+                                BSP_Motor_Stop();
+                                timedout = 1u;
+                                break;
+                            }
+                        }
+
+                        HAL_Delay(25u);     /* 等最后一个采样窗口算完, 尾部不丢 */
+                        BSP_ADC_GetPeak(&pmn, &pmx, &pcnt, 0u);
+                        measured = 1u;
+
+                        if (timedout != 0u) {
+                            status = PROTO_ST_ERR_TIMEOUT;
+                        }
+                    }
+                }
+
+            } else {
+                /* 只读 / 读并清零 */
+                BSP_ADC_GetPeak(&pmn, &pmx, &pcnt,
+                                (uint8_t)(mode == PROTO_MRE_PEAK_MODE_CLEAR ? 1u : 0u));
+                measured = 1u;
+            }
+        }
+
+        /* 判定: 整圈最低值低于下限, 或最高值高于上限 -> 不合格 */
+        if ((measured != 0u) && (status == PROTO_ST_OK) && (pcnt != 0u) &&
+            ((pmn < PROTO_MRE_PEAK_LO) || (pmx > PROTO_MRE_PEAK_HI))) {
+            status = PROTO_ST_ERR_TEST;
+        }
+
+        n = 0;
+        s_payload[n++] = status;
+        put_u16(&s_payload[n], pmn);  n += 2u;
+        put_u16(&s_payload[n], pmx);  n += 2u;
+        put_u32(&s_payload[n], pcnt); n += 4u;
+        proto_send(cmd, seq, s_payload, n);
+        break;
+    }
+
+    /*--- U2/U3 交叉校验 ---*/
+    case PROTO_CMD_CROSS_CHECK: {
+        BSP_ADC_Snapshot_t u2adc;
+        LINK_Snap_t u2, u3;
+        uint8_t  ackbuf[40];
+        uint16_t acklen = 0;
+        uint8_t  rc;
+        uint8_t  peer = 0;
+        uint8_t  status;
+
+        /* 取本机快照 */
+        BSP_ADC_GetSnapshot(&u2adc);
+        u2.flags         = (uint8_t)(BSP_ADC_IsRunning() ? 0x01u : 0x00u);
+        u2.mre_last      = u2adc.mre_last;
+        u2.mre_min       = u2adc.mre_min;
+        u2.mre_max       = u2adc.mre_max;
+        u2.mre_mean      = u2adc.mre_mean;
+        u2.mre_mv        = u2adc.mre_mv;
+        u2.vref_last     = u2adc.vref_last;
+        u2.vref_mv       = u2adc.vref_mv;
+        u2.window_size   = u2adc.window_size;
+        u2.total_samples = u2adc.total_samples;
+
+        memset(&u3, 0, sizeof(u3));
+
+        /* 拉对端快照 */
+        rc = LINK_Command(LINK_CMD_GET_SNAP, NULL, 0u, ackbuf, sizeof(ackbuf), &acklen);
+
+        if ((rc != LINK_OK) || (acklen < (uint16_t)(1u + LINK_SNAP_LEN)) ||
+            (ackbuf[0] != LINK_ST_OK)) {
+            status = PROTO_ST_ERR_TIMEOUT;      /* U3 不在线/应答不合法 */
+        } else {
+            LINK_SnapUnpack(&u3, &ackbuf[1]);
+
+            peer = PROTO_CROSS_PEER_ALIVE;
+            if (u3.flags & 0x01u) {
+                peer |= PROTO_CROSS_PEER_ADC;
+            }
+
+            {
+                int32_t d_mre  = (int32_t)u2.mre_last  - (int32_t)u3.mre_last;
+                int32_t d_vref = (int32_t)u2.vref_last - (int32_t)u3.vref_last;
+
+                if (d_mre  < 0) { d_mre  = -d_mre;  }
+                if (d_vref < 0) { d_vref = -d_vref; }
+
+                if ((d_mre  > (int32_t)PROTO_CROSS_TOL_MRE_LSB) ||
+                    (d_vref > (int32_t)PROTO_CROSS_TOL_VREF_LSB)) {
+                    peer  |= PROTO_CROSS_MISMATCH;
+                    status = PROTO_ST_ERR_TEST;
+                } else {
+                    status = PROTO_ST_OK;
+                }
+            }
+        }
+
+        n = 0;
+        s_payload[n++] = status;
+        s_payload[n++] = peer;
+        LINK_SnapPack(&s_payload[n], &u2); n += (uint16_t)LINK_SNAP_LEN;
+        LINK_SnapPack(&s_payload[n], &u3); n += (uint16_t)LINK_SNAP_LEN;
         proto_send(cmd, seq, s_payload, n);
         break;
     }

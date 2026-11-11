@@ -37,6 +37,8 @@
 "u2\bsp_tmc2209.o"
 "u2\protocol_frame.o"
 "u2\protocol.o"
+"u2\link_u3.o"
+"u2\link_proto.o"
 --strict --scatter "U2\U2.sct"
 --summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
 --info sizes --info totals --info unused --info veneers

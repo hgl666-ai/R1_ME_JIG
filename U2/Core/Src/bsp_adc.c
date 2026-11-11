@@ -36,6 +36,11 @@ static volatile uint8_t  s_running = 0;
 /* 当前统计窗口 (由 DMA 中断更新, 主循环加临界区读取) */
 static volatile BSP_ADC_Snapshot_t s_snap;
 
+/* 自清零以来累计的极值: 判"整圈有没有低于下限 / 高于上限"用 */
+static volatile uint16_t s_peak_min = 0xFFFFu;
+static volatile uint16_t s_peak_max = 0u;
+static volatile uint32_t s_peak_cnt = 0u;
+
 uint16_t BSP_ADC_RawToMv(uint16_t raw)
 {
     /* mV = raw * 3300 / 4095, 用 32 位中间量避免溢出 */
@@ -80,6 +85,11 @@ static void adc_accumulate(uint16_t start, uint16_t count)
     s_snap.mre_mv        = BSP_ADC_RawToMv(s_adc_buf[start + count - 2u]);
     s_snap.vref_mv       = BSP_ADC_RawToMv(vref);
     s_snap.total_samples = s_snap.total_samples + n;
+
+    /* 跨窗口累计极值: 把一个窗口的 mn/mx 并进全局极值 */
+    if (mn < s_peak_min) { s_peak_min = mn; }
+    if (mx > s_peak_max) { s_peak_max = mx; }
+    s_peak_cnt += n;
 }
 
 /*==============================================================================
@@ -189,5 +199,33 @@ void BSP_ADC_GetSnapshot(BSP_ADC_Snapshot_t *out)
     primask = __get_PRIMASK();
     __disable_irq();
     *out = s_snap;
+    __set_PRIMASK(primask);
+}
+
+void BSP_ADC_GetPeak(uint16_t *mn, uint16_t *mx, uint32_t *cnt, uint8_t clear)
+{
+    uint32_t primask;
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+
+    if (cnt != NULL) {
+        *cnt = s_peak_cnt;
+    }
+    if (s_peak_cnt == 0u) {
+        /* 清零后还没采到数据: 报 0, 别把 0xFFFF 的初值漏出去 */
+        if (mn != NULL) { *mn = 0u; }
+        if (mx != NULL) { *mx = 0u; }
+    } else {
+        if (mn != NULL) { *mn = s_peak_min; }
+        if (mx != NULL) { *mx = s_peak_max; }
+    }
+
+    if (clear != 0u) {
+        s_peak_min = 0xFFFFu;
+        s_peak_max = 0u;
+        s_peak_cnt = 0u;
+    }
+
     __set_PRIMASK(primask);
 }

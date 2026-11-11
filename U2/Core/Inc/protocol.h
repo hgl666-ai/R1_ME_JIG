@@ -23,6 +23,36 @@
 #define PROTO_CMD_MOTOR_STOP      0x0011u   /* 立即停止 */
 #define PROTO_CMD_MOTOR_STATUS    0x0012u   /* ACK: 状态码 + 运行标志(1) + 已走步数(4) + 目标步数(4) */
 #define PROTO_CMD_MRE_QUERY       0x0020u   /* 查询最近一个 MRE 采样窗口 */
+#define PROTO_CMD_CROSS_CHECK     0x0021u   /* U2/U3 交叉校验: 拉 U3 快照并比对 */
+#define PROTO_CMD_MRE_PEAK        0x0022u   /* 整圈极值: 低于下限或高于上限即判不合格 */
+
+/*===== MRE 整圈极值判据 (单位 ADC LSB, 1 LSB ≈ 0.806mV) =====
+ * ★ 这两个是占位值, 必须按 DUT 实际输出改。
+ *   判法: 转完一圈后, 若 peak_min < LO 或 peak_max > HI → 状态码回 05 ERR_TEST。
+ *   测出来再定, 不要拿现在的值当结论。 */
+#define PROTO_MRE_PEAK_LO         200u      /* 整圈最低值不得低于此值 (≈161mV) */
+#define PROTO_MRE_PEAK_HI         3900u     /* 整圈最高值不得高于此值 (≈3143mV) */
+
+/*===== MRE_PEAK 请求里的 mode =====*/
+#define PROTO_MRE_PEAK_MODE_READ     0u    /* 只读 */
+#define PROTO_MRE_PEAK_MODE_CLEAR    1u    /* 读并清零 */
+#define PROTO_MRE_PEAK_MODE_SELFTEST 2u    /* ★自动测一圈: 清零 -> 转一圈 -> 读结果 */
+
+/*===== 自动测一圈的默认参数 (请求 LEN=1 时生效) =====*/
+#define PROTO_MRE_PEAK_STEPS         3200u /* 16 微步下 3200 步 = 1 圈 */
+#define PROTO_MRE_PEAK_FREQ          4000u /* 4000Hz -> 约 0.8 秒一圈 */
+#define PROTO_MRE_PEAK_STEPS_MAX     100000u
+
+/*===== 交叉校验判据 (单位: ADC LSB, 1 LSB ≈ 0.806mV) =====
+ * 两路缓冲接同一个输入节点、同一颗 LM358 的两个半边, 差异主要来自
+ * 运放失调、两片各自的 ADC 与 VDDA。给足余量, 只抓"明显不一致"。 */
+#define PROTO_CROSS_TOL_MRE_LSB   50u    /* MRE 读数差 > 50 LSB (≈40mV) 判超差 */
+#define PROTO_CROSS_TOL_VREF_LSB  20u    /* 3.3V 基准读数差 > 20 LSB 判超差 */
+
+/*===== CROSS_CHECK 应答中 peer_flags 的位定义 =====*/
+#define PROTO_CROSS_PEER_ALIVE    0x01u   /* U3 有合法应答 */
+#define PROTO_CROSS_PEER_ADC      0x02u   /* U3 的 ADC 在采集 */
+#define PROTO_CROSS_MISMATCH      0x04u   /* 超出判据 */
 
 /*===== 通用状态码 (M1 通讯协议 xlsx 的【通用状态码】表) =====*/
 #define PROTO_ST_OK            0x00u

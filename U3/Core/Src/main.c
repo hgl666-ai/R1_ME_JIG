@@ -24,7 +24,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "bsp_adc.h"
+#include "link_slave.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -92,6 +93,15 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
+  /* U3 只做一件事: 和 U2 同源同构地连续采 MRE, 供 U2 做交叉校验。
+   * 没有电机、没有 TMC、没有 USB。 */
+
+  /* 1. MRE 连续采样: ADC1 双通道扫描 + DMA 循环 (覆盖 MX_ADC1_Init 的单次配置) */
+  BSP_ADC_Init();
+
+  /* 2. 内部链路: USART1 RXNE 中断 + 命令处理 */
+  LINK_Init();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -101,6 +111,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* 解帧 -> 处理 -> 回包。没有别的活, 所以直接在这里阻塞轮询。 */
+    LINK_Poll();
   }
   /* USER CODE END 3 */
 }

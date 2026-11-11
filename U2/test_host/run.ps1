@@ -21,9 +21,28 @@ Copy-Item (Join-Path $core "Src\bsp_motor.c")      $work -Force
 Copy-Item (Join-Path $core "Inc\bsp_motor.h")      $work -Force
 Copy-Item (Join-Path $core "Src\protocol_frame.c") $work -Force
 Copy-Item (Join-Path $core "Inc\protocol_frame.h") $work -Force
+Copy-Item (Join-Path $core "Src\link_proto.c")     $work -Force
+Copy-Item (Join-Path $core "Inc\link_proto.h")     $work -Force
 Copy-Item (Join-Path $here "test_motor.c")         $work -Force
 Copy-Item (Join-Path $here "test_frame.c")         $work -Force
+Copy-Item (Join-Path $here "test_link.c")          $work -Force
 Copy-Item (Join-Path $here "stub\main.h")          $work -Force
+
+# --- 1b. 校验 U2/U3 两份 link_proto 完全一致 ---
+$u3inc = Join-Path (Split-Path -Parent $u2) "U3\Core\Inc\link_proto.h"
+$u3src = Join-Path (Split-Path -Parent $u2) "U3\Core\Src\link_proto.c"
+foreach ($pair in @(@((Join-Path $core "Inc\link_proto.h"), $u3inc),
+                    @((Join-Path $core "Src\link_proto.c"), $u3src))) {
+    if (Test-Path $pair[1]) {
+        $h1 = (Get-FileHash $pair[0] -Algorithm SHA256).Hash
+        $h2 = (Get-FileHash $pair[1] -Algorithm SHA256).Hash
+        if ($h1 -ne $h2) {
+            throw "U2/U3 两份 $(Split-Path -Leaf $pair[0]) 内容不一致（链路契约必须完全相同）"
+        }
+    } else {
+        Write-Host "提示: 找不到 $($pair[1])，跳过一致性校验" -ForegroundColor Yellow
+    }
+}
 
 # --- 2. 从 bsp_tmc2209.c 抽出 tmc_crc8() 函数体 ---
 $tmcSrc = Join-Path $core "Src\bsp_tmc2209.c"
@@ -34,7 +53,7 @@ Set-Content -Path (Join-Path $work "crc8_extract.c") -Value $m.Value -Encoding U
 
 # --- 3. 编译并运行 ---
 $result = 0
-foreach ($t in @("test_frame", "test_motor")) {
+foreach ($t in @("test_frame", "test_motor", "test_link")) {
     Write-Host ""
     Write-Host "=== $t ===" -ForegroundColor Cyan
     & $Gcc -std=c99 -Wall -Wextra -I $work (Join-Path $work "$t.c") -o (Join-Path $work "$t.exe")

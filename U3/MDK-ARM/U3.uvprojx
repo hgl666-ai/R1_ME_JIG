@@ -512,6 +512,31 @@
             </File>
           </Files>
         </Group>
+        <Group>
+          <GroupName>Application/User/BSP</GroupName>
+          <Files>
+            <File>
+              <FileName>bsp_adc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/bsp_adc.c</FilePath>
+            </File>
+            <File>
+              <FileName>protocol_frame.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/protocol_frame.c</FilePath>
+            </File>
+            <File>
+              <FileName>link_slave.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/link_slave.c</FilePath>
+            </File>
+            <File>
+              <FileName>link_proto.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/link_proto.c</FilePath>
+            </File>
+          </Files>
+        </Group>
       </Groups>
     </Target>
   </Targets>

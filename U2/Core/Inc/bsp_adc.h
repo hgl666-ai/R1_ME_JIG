@@ -42,6 +42,16 @@ uint8_t  BSP_ADC_IsRunning(void);
 /** @brief 取一份当前快照 (内部做临界区保护, 可在主循环任意位置调用) */
 void     BSP_ADC_GetSnapshot(BSP_ADC_Snapshot_t *out);
 
+/**
+  * @brief 取"自上次清零以来"累计的极值 —— 跨窗口累积, 用于判整圈是否超限
+  * @param mn     输出: 最低原始值
+  * @param mx     输出: 最高原始值
+  * @param cnt    输出: 累计样本数 (0 表示清零后还没采到数据)
+  * @param clear  1 = 读完立即清零, 0 = 只读
+  * @note  可以只传关心的指针, 其余传 NULL
+  */
+void     BSP_ADC_GetPeak(uint16_t *mn, uint16_t *mx, uint32_t *cnt, uint8_t clear);
+
 /** @brief 原始值 -> mV, 使用 VDDA = 3300mV */
 uint16_t BSP_ADC_RawToMv(uint16_t raw);
 

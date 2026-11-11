@@ -36,6 +36,8 @@ u2\protocol.o: ../Core/Inc/protocol_frame.h
 u2\protocol.o: ../Core/Inc/bsp_motor.h
 u2\protocol.o: ../Core/Inc/bsp_adc.h
 u2\protocol.o: ../Core/Inc/bsp_tmc2209.h
+u2\protocol.o: ../Core/Inc/link_u3.h
+u2\protocol.o: ../Core/Inc/link_proto.h
 u2\protocol.o: ../USB_DEVICE/App/usbd_cdc_if.h
 u2\protocol.o: ../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc/usbd_cdc.h
 u2\protocol.o: ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ioreq.h

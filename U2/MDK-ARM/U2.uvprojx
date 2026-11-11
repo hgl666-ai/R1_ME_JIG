@@ -1324,6 +1324,16 @@
               <FileType>1</FileType>
               <FilePath>../Core/Src/protocol.c</FilePath>
             </File>
+            <File>
+              <FileName>link_u3.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/link_u3.c</FilePath>
+            </File>
+            <File>
+              <FileName>link_proto.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/link_proto.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
