@@ -23,7 +23,7 @@ EXPECT = {
     0x0012: (0, 10),
     0x0020: (0, 22),
     0x0021: (0, 44),
-    0x0022: (1, 9),
+    0x0022: ((1, 7), 11),   # 短格式 LEN=1, 长格式 LEN=7
     0x0101: (0, 8),
     0x0102: (0, 22),
 }
@@ -66,22 +66,25 @@ def check(buf, hint):
         return False, '未定义命令码 0x%04X' % cmd
 
     req, ack = EXPECT[cmd]
+    req_ok = (ln in req) if isinstance(req, tuple) else (ln == req)
+    req_txt = ('/'.join(str(x) for x in req) if isinstance(req, tuple) else str(req))
+
     if hint == 'ack':
         if ln != ack:
             return False, '%s 应答 LEN 应为 %d，实为 %d' % (CMD_NAME[cmd], ack, ln)
         kind = 'ACK'
     elif hint == 'req':
-        if ln != req:
-            return False, '%s 请求 LEN 应为 %d，实为 %d' % (CMD_NAME[cmd], req, ln)
+        if not req_ok:
+            return False, '%s 请求 LEN 应为 %s，实为 %d' % (CMD_NAME[cmd], req_txt, ln)
         kind = 'REQ'
     else:
         if ln == ack:
             kind = 'ACK'
-        elif ln == req:
+        elif req_ok:
             kind = 'REQ'
         else:
-            return False, '%s LEN=%d，既非请求(%d)也非应答(%d)' % (
-                CMD_NAME[cmd], ln, req, ack)
+            return False, '%s LEN=%d，既非请求(%s)也非应答(%d)' % (
+                CMD_NAME[cmd], ln, req_txt, ack)
 
     return True, '%-12s %s LEN=%2d CRC ok' % (CMD_NAME[cmd], kind, ln)
 

@@ -41,6 +41,19 @@ static volatile uint16_t s_peak_min = 0xFFFFu;
 static volatile uint16_t s_peak_max = 0u;
 static volatile uint32_t s_peak_cnt = 0u;
 
+/* 周期计数: 过阈值上升沿 (带迟滞)。
+ * armed=1 时等信号冲上 EDGE_HIGH 计一次; 计完后要回落到 EDGE_LOW 以下才重新武装,
+ * 这样噪声不会在阈值附近反复触发。状态跨窗口保留, 所以窗口边界不会漏计数。 */
+static volatile uint16_t s_edge_cnt   = 0u;
+static volatile uint8_t  s_edge_armed = 0u;
+
+/* 波形抓取缓冲 */
+static uint16_t          s_cap_buf[BSP_ADC_CAP_POINTS];
+static volatile uint16_t s_cap_cnt  = 0u;
+static volatile uint8_t  s_cap_on   = 0u;
+static volatile uint8_t  s_cap_div  = 1u;
+static volatile uint8_t  s_cap_skip = 0u;
+
 uint16_t BSP_ADC_RawToMv(uint16_t raw)
 {
     /* mV = raw * 3300 / 4095, 用 32 位中间量避免溢出 */
@@ -70,6 +83,18 @@ static void adc_accumulate(uint16_t start, uint16_t count)
         if (mre > mx) { mx = mre; }
         sum += mre;
         n++;
+
+        /* 过阈值上升沿计数 (带迟滞) */
+        if (s_edge_armed != 0u) {
+            if (mre >= BSP_ADC_EDGE_HIGH) {
+                if (s_edge_cnt < 0xFFFFu) {
+                    s_edge_cnt++;
+                }
+                s_edge_armed = 0u;
+            }
+        } else if (mre <= BSP_ADC_EDGE_LOW) {
+            s_edge_armed = 1u;
+        }
     }
 
     if (n == 0u) {
@@ -90,6 +115,21 @@ static void adc_accumulate(uint16_t start, uint16_t count)
     if (mn < s_peak_min) { s_peak_min = mn; }
     if (mx > s_peak_max) { s_peak_max = mx; }
     s_peak_cnt += n;
+
+    /* 波形抓取: 每 div 个窗口存一个 mre_mean */
+    if (s_cap_on != 0u) {
+        if (s_cap_skip == 0u) {
+            if (s_cap_cnt < BSP_ADC_CAP_POINTS) {
+                s_cap_buf[s_cap_cnt] = s_snap.mre_mean;
+                s_cap_cnt++;
+                s_cap_skip = (uint8_t)(s_cap_div - 1u);
+            } else {
+                s_cap_on = 0u;      /* 抓满 */
+            }
+        } else {
+            s_cap_skip--;
+        }
+    }
 }
 
 /*==============================================================================
@@ -202,7 +242,8 @@ void BSP_ADC_GetSnapshot(BSP_ADC_Snapshot_t *out)
     __set_PRIMASK(primask);
 }
 
-void BSP_ADC_GetPeak(uint16_t *mn, uint16_t *mx, uint32_t *cnt, uint8_t clear)
+void BSP_ADC_GetPeak(uint16_t *mn, uint16_t *mx, uint32_t *cnt,
+                     uint16_t *edges, uint8_t clear)
 {
     uint32_t primask;
 
@@ -220,12 +261,51 @@ void BSP_ADC_GetPeak(uint16_t *mn, uint16_t *mx, uint32_t *cnt, uint8_t clear)
         if (mn != NULL) { *mn = s_peak_min; }
         if (mx != NULL) { *mx = s_peak_max; }
     }
+    if (edges != NULL) {
+        *edges = s_edge_cnt;
+    }
 
     if (clear != 0u) {
-        s_peak_min = 0xFFFFu;
-        s_peak_max = 0u;
-        s_peak_cnt = 0u;
+        s_peak_min   = 0xFFFFu;
+        s_peak_max   = 0u;
+        s_peak_cnt   = 0u;
+        s_edge_cnt   = 0u;
+        /* 清零后先解除武装: 要等信号回落到 EDGE_LOW 以下才允许计第一个沿,
+         * 否则起点相位若在高位, 会把一个不完整的周期也算进去 (+1 偏差)。 */
+        s_edge_armed = 0u;
     }
 
     __set_PRIMASK(primask);
+}
+
+/*==============================================================================
+ * 波形抓取
+ *============================================================================*/
+void BSP_ADC_CaptureStart(uint8_t div)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    s_cap_on   = 0u;
+    s_cap_cnt  = 0u;
+    s_cap_div  = (div == 0u) ? 1u : div;
+    s_cap_skip = 0u;
+    s_cap_on   = 1u;
+    __set_PRIMASK(primask);
+}
+
+uint16_t BSP_ADC_CaptureStop(void)
+{
+    uint32_t primask = __get_PRIMASK();
+
+    __disable_irq();
+    s_cap_on = 0u;
+    __set_PRIMASK(primask);
+
+    return s_cap_cnt;
+}
+
+const uint16_t *BSP_ADC_CaptureBuf(void)
+{
+    return s_cap_buf;
 }

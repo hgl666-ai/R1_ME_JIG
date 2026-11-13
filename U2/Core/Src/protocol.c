@@ -66,16 +66,48 @@ static uint32_t get_u32(const uint8_t *p)
 static void proto_send(uint16_t cmd, uint16_t seq, const uint8_t *data, uint16_t len)
 {
     uint16_t n = Frame_Build(s_tx, cmd, seq, data, len);
+    uint16_t off = 0u;
+
+    /* USB CDC 的 FS 端点单包只有 64 字节, 而 CDC 类的 DataIn 回调不会自动续发
+     * 剩下的数据。所以这里自己按 64 字节分块, 每块等它发完再发下一块。
+     * 这样无论应答是 11 字节还是 252 字节都能完整发出去。 */
+    while (off < n) {
+        uint16_t chunk = (uint16_t)(((n - off) > 64u) ? 64u : (n - off));
+        uint32_t t0 = HAL_GetTick();
+
+        while (CDC_Transmit_FS(&s_tx[off], chunk) == USBD_BUSY) {
+            if ((HAL_GetTick() - t0) > 50u) {
+                return;         /* 超时丢弃整帧, 由 PC 侧重发 */
+            }
+        }
+        off = (uint16_t)(off + chunk);
+    }
+}
+
+/*==============================================================================
+ * 执行一段运动并阻塞等待它走完
+ * @retval 1=正常走完 0=启动失败或超时(内部已停电机)
+ *============================================================================*/
+static uint8_t mre_move_wait(uint8_t dir, uint32_t steps, uint32_t freq)
+{
+    uint32_t t_ms;
     uint32_t t0;
 
-    /* CDC 上一次发送还没完成时返回 USBD_BUSY; 短暂等待后重试。
-     * 超时就丢弃这一帧 —— 治具是被动应答方, 丢一帧由 PC 侧重发更简单。 */
+    if (!BSP_Motor_Move(dir, steps, freq)) {
+        return 0u;
+    }
+
+    /* 超时 = 理论耗时 x2 + 1s, 覆盖加减速段 */
+    t_ms = (uint32_t)(((uint64_t)steps * 1000u) / (uint64_t)freq) * 2u + 1000u;
     t0 = HAL_GetTick();
-    while (CDC_Transmit_FS(s_tx, n) == USBD_BUSY) {
-        if ((HAL_GetTick() - t0) > 20u) {
-            return;
+
+    while (BSP_Motor_IsBusy()) {
+        if ((HAL_GetTick() - t0) > t_ms) {
+            BSP_Motor_Stop();
+            return 0u;
         }
     }
+    return 1u;
 }
 
 /*==============================================================================
@@ -157,24 +189,27 @@ static void proto_dispatch(uint16_t cmd, uint16_t seq, const uint8_t *data, uint
         break;
     }
 
-    /*--- MRE 整圈极值 (低于下限 / 高于上限即不合格) ---*/
+    /*--- MRE 整圈极值 / 周期数 (低于下限、高于上限、周期数不对都判不合格) ---*/
     case PROTO_CMD_MRE_PEAK: {
         uint16_t pmn = 0u;
         uint16_t pmx = 0u;
+        uint16_t pedge = 0u;
         uint32_t pcnt = 0u;
         uint8_t  status = PROTO_ST_OK;
-        uint8_t  measured = 0u;     /* 1 = 已经取到极值, 需要判定 */
+        uint8_t  measured = 0u;     /* 1 = 已经取到数据, 需要判定 */
+        uint8_t  revs = 1u;         /* 本次动作应走的圈数, 用于周期数判定 */
 
         if ((len != 1u) && (len != 7u)) {
             status = PROTO_ST_ERR_PARAM;
         } else {
             uint8_t mode = data[0];
 
-            if (mode > PROTO_MRE_PEAK_MODE_SELFTEST) {
+            if (mode > PROTO_MRE_PEAK_MODE_SELFTEST3) {
                 status = PROTO_ST_ERR_PARAM;
 
-            } else if (mode == PROTO_MRE_PEAK_MODE_SELFTEST) {
-                /* 清零 -> 转一圈 -> 读结果, 一条命令搞定 */
+            } else if ((mode == PROTO_MRE_PEAK_MODE_SELFTEST) ||
+                       (mode == PROTO_MRE_PEAK_MODE_SELFTEST3)) {
+                /* 一条命令跑完: 清零 -> 运动 -> 等走完 -> 读结果 */
                 uint32_t steps = (len == 7u) ? get_u32(&data[1]) : PROTO_MRE_PEAK_STEPS;
                 uint32_t freq  = (len == 7u) ? get_u16(&data[5]) : PROTO_MRE_PEAK_FREQ;
 
@@ -183,56 +218,117 @@ static void proto_dispatch(uint16_t cmd, uint16_t seq, const uint8_t *data, uint
                 } else if (BSP_Motor_IsBusy()) {
                     status = PROTO_ST_BUSY;
                 } else {
-                    uint32_t t_ms;
-                    uint32_t t0;
-                    uint8_t  timedout = 0u;
+                    uint8_t ok;
 
-                    BSP_ADC_GetPeak(NULL, NULL, NULL, 1u);      /* 清零 */
+                    BSP_ADC_GetPeak(NULL, NULL, NULL, NULL, 1u);   /* 清零 */
 
-                    if (!BSP_Motor_Move(PROTO_DIR_CW, steps, freq)) {
-                        status = PROTO_ST_ERR_PARAM;
+                    if (mode == PROTO_MRE_PEAK_MODE_SELFTEST) {
+                        /* 单圈: 正转 1 圈 */
+                        revs = 1u;
+                        ok = mre_move_wait(PROTO_DIR_CW, steps, freq);
                     } else {
-                        /* 超时 = 理论耗时 x2 + 1s, 覆盖加减速段 */
-                        t_ms = (uint32_t)(((uint64_t)steps * 1000u) / (uint64_t)freq) * 2u + 1000u;
-                        t0 = HAL_GetTick();
-
-                        while (BSP_Motor_IsBusy()) {
-                            if ((HAL_GetTick() - t0) > t_ms) {
-                                BSP_Motor_Stop();
-                                timedout = 1u;
-                                break;
+                        /* 三段: 正转 2 圈 -> 停顿 -> 反转 1 圈, 总行程 3 圈 */
+                        revs = 3u;
+                        ok = mre_move_wait(PROTO_DIR_CW, steps * 2u, freq);
+                        if (ok != 0u) {
+                            if (PROTO_MRE_SEG_DWELL_MS > 0u) {
+                                HAL_Delay(PROTO_MRE_SEG_DWELL_MS);
                             }
+                            ok = mre_move_wait(PROTO_DIR_CCW, steps, freq);
                         }
+                    }
 
-                        HAL_Delay(25u);     /* 等最后一个采样窗口算完, 尾部不丢 */
-                        BSP_ADC_GetPeak(&pmn, &pmx, &pcnt, 0u);
-                        measured = 1u;
+                    HAL_Delay(25u);     /* 等最后一个采样窗口算完, 尾部不丢 */
+                    BSP_ADC_GetPeak(&pmn, &pmx, &pcnt, &pedge, 0u);
+                    measured = 1u;
 
-                        if (timedout != 0u) {
-                            status = PROTO_ST_ERR_TIMEOUT;
-                        }
+                    if (ok == 0u) {
+                        status = PROTO_ST_ERR_TIMEOUT;
                     }
                 }
 
             } else {
                 /* 只读 / 读并清零 */
-                BSP_ADC_GetPeak(&pmn, &pmx, &pcnt,
+                BSP_ADC_GetPeak(&pmn, &pmx, &pcnt, &pedge,
                                 (uint8_t)(mode == PROTO_MRE_PEAK_MODE_CLEAR ? 1u : 0u));
                 measured = 1u;
             }
         }
 
-        /* 判定: 整圈最低值低于下限, 或最高值高于上限 -> 不合格 */
-        if ((measured != 0u) && (status == PROTO_ST_OK) && (pcnt != 0u) &&
-            ((pmn < PROTO_MRE_PEAK_LO) || (pmx > PROTO_MRE_PEAK_HI))) {
-            status = PROTO_ST_ERR_TEST;
+        /* 判定 (三条互相独立, 任一条触发即不合格; 阈值 0 表示关闭该条) */
+        if ((measured != 0u) && (status == PROTO_ST_OK) && (pcnt != 0u)) {
+
+            if ((PROTO_MRE_PEAK_MIN_CEIL > 0u) && (pmn > PROTO_MRE_PEAK_MIN_CEIL)) {
+                status = PROTO_ST_ERR_TEST;             /* 整圈最低值太高 -> 信号没扫下去 */
+            } else if ((PROTO_MRE_PEAK_LO > 0u) && (pmn < PROTO_MRE_PEAK_LO)) {
+                status = PROTO_ST_ERR_TEST;             /* 整圈最低值过低 */
+            } else if ((PROTO_MRE_PEAK_HI > 0u) && (pmx > PROTO_MRE_PEAK_HI)) {
+                status = PROTO_ST_ERR_TEST;             /* 整圈最高值过高 */
+            } else if ((PROTO_MRE_PP_MIN > 0u) &&
+                       ((uint16_t)(pmx - pmn) < PROTO_MRE_PP_MIN)) {
+                status = PROTO_ST_ERR_TEST;             /* 峰峰值太小 -> 信号没扫开 */
+            } else if (PROTO_MRE_EDGE_PER_REV > 0u) {
+                uint16_t want = (uint16_t)(PROTO_MRE_EDGE_PER_REV * revs);
+                uint16_t diff = (uint16_t)((pedge > want) ? (pedge - want)
+                                                          : (want - pedge));
+                if (diff > PROTO_MRE_EDGE_TOL) {
+                    status = PROTO_ST_ERR_TEST;         /* 周期数超出容差 */
+                }
+            }
         }
 
         n = 0;
         s_payload[n++] = status;
-        put_u16(&s_payload[n], pmn);  n += 2u;
-        put_u16(&s_payload[n], pmx);  n += 2u;
-        put_u32(&s_payload[n], pcnt); n += 4u;
+        put_u16(&s_payload[n], pmn);   n += 2u;
+        put_u16(&s_payload[n], pmx);   n += 2u;
+        put_u16(&s_payload[n], pedge); n += 2u;
+        put_u32(&s_payload[n], pcnt);  n += 4u;
+        proto_send(cmd, seq, s_payload, n);
+        break;
+    }
+
+    /*--- 波形抓取 (调试用, 不用在产线) ---*/
+    case PROTO_CMD_WAVE_CAP: {
+        uint8_t  status = PROTO_ST_OK;
+        uint16_t cnt = 0u;
+        uint8_t  mode;
+
+        if (len != 1u) {
+            status = PROTO_ST_ERR_PARAM;
+        } else {
+            mode = data[0];
+            if (mode > PROTO_WAVE_MODE_SPIN) {
+                status = PROTO_ST_ERR_PARAM;
+            } else if (BSP_Motor_IsBusy()) {
+                status = PROTO_ST_BUSY;
+            } else if (mode == PROTO_WAVE_MODE_SPIN) {
+                BSP_ADC_CaptureStart(2u);           /* 每 2 个窗口存一个, 覆盖整圈 */
+                if (!mre_move_wait(PROTO_DIR_CW, PROTO_MRE_PEAK_STEPS,
+                                   PROTO_MRE_PEAK_FREQ)) {
+                    BSP_ADC_CaptureStop();
+                    status = PROTO_ST_ERR_TIMEOUT;
+                }
+                if (status == PROTO_ST_OK) {
+                    cnt = BSP_ADC_CaptureStop();
+                }
+            } else {
+                BSP_ADC_CaptureStart(1u);           /* 静态: 每窗口存一个 */
+                HAL_Delay(1300u);                   /* 120 点 x 10.75ms */
+                cnt = BSP_ADC_CaptureStop();
+            }
+        }
+
+        n = 0u;
+        s_payload[n++] = status;
+        s_payload[n++] = (uint8_t)cnt;
+        {
+            const uint16_t *buf = BSP_ADC_CaptureBuf();
+            uint16_t i;
+            for (i = 0u; i < cnt; i++) {
+                put_u16(&s_payload[n], buf[i]);
+                n += 2u;
+            }
+        }
         proto_send(cmd, seq, s_payload, n);
         break;
     }

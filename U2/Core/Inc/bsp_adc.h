@@ -20,6 +20,17 @@
 /* 每个完整窗口包含的 MRE 样本数 (也等于每通道的窗口长度) */
 #define BSP_ADC_WINDOW_SAMPLES   256u
 
+/*===== 周期计数 (过阈值上升沿, 带迟滞) =====
+ * 用途: 数一圈里 MRE 波形走了几个周期。
+ * 当信号负半周被钳在 0 时, 正半周仍然完整, 所以数沿不受影响。
+ * 阈值是 ADC 原始值, 按实际波形调; 400 LSB 的迟滞用来抑制噪声重复计数。 */
+/* 2026-11-13 实测对比:
+ *   1400/1000 -> 三圈 edges = 6 6 7 5 5 6 (全部在 5~7)
+ *   1000/ 500 -> 三圈 edges = 8 5 5 3 3   (噪声开始参与, 反而更差)
+ * 所以保持高阈值。 */
+#define BSP_ADC_EDGE_HIGH        1400u   /* 超过此值计一个上升沿 (≈1128mV) */
+#define BSP_ADC_EDGE_LOW         1000u   /* 回落到此值以下才允许下次计数 (≈805mV) */
+
 typedef struct {
     uint16_t mre_last;      /* 最近一次 MRE 原始值 (12bit) */
     uint16_t mre_min;       /* 最近一个完整窗口内的最小值 */
@@ -43,16 +54,32 @@ uint8_t  BSP_ADC_IsRunning(void);
 void     BSP_ADC_GetSnapshot(BSP_ADC_Snapshot_t *out);
 
 /**
-  * @brief 取"自上次清零以来"累计的极值 —— 跨窗口累积, 用于判整圈是否超限
+  * @brief 取"自上次清零以来"累计的极值与周期数
   * @param mn     输出: 最低原始值
   * @param mx     输出: 最高原始值
   * @param cnt    输出: 累计样本数 (0 表示清零后还没采到数据)
+  * @param edges  输出: 过阈值上升沿个数 (即波形走过几个周期)
   * @param clear  1 = 读完立即清零, 0 = 只读
   * @note  可以只传关心的指针, 其余传 NULL
   */
-void     BSP_ADC_GetPeak(uint16_t *mn, uint16_t *mx, uint32_t *cnt, uint8_t clear);
+void     BSP_ADC_GetPeak(uint16_t *mn, uint16_t *mx, uint32_t *cnt,
+                         uint16_t *edges, uint8_t clear);
 
 /** @brief 原始值 -> mV, 使用 VDDA = 3300mV */
 uint16_t BSP_ADC_RawToMv(uint16_t raw);
+
+/*===== 波形抓取 =====
+ * 每隔 div 个统计窗口(每个 10.75ms)把该窗口的 mre_mean 存进缓冲, 用于把真实
+ * 波形一次性传回 PC。抓满 BSP_ADC_CAP_POINTS 点后自动停止。 */
+#define BSP_ADC_CAP_POINTS       120u
+
+/** @brief 开始抓波形, div = 每几个窗口存一个 (0 当作 1) */
+void            BSP_ADC_CaptureStart(uint8_t div);
+
+/** @brief 停止抓取, 返回已抓到的点数 */
+uint16_t        BSP_ADC_CaptureStop(void);
+
+/** @brief 指向抓取缓冲 (只读), 点数由 CaptureStop 给出 */
+const uint16_t *BSP_ADC_CaptureBuf(void);
 
 #endif /* __BSP_ADC_H */
